@@ -1,60 +1,48 @@
 #!/bin/bash
 
-# Execute kubeadm init script
-echo ""
-echo ""
 echo "##################################"
 echo "#   RUNNING master.sh script     #"
 echo "##################################"
-sleep 2
-echo ""
-echo ""
-sudo bash /tmp/scripts/kube_init_script.sh
-echo "...done..."
 
-# Generate Cluster join command
-echo ""
+echo "[TASK 1] Initialize Kubernetes Cluster"
+kubeadm init --pod-network-cidr=10.244.0.0/16
+
+# Validate cluster init
+if [ ! -f /etc/kubernetes/admin.conf ]; then
+  echo "❌ kubeadm init failed. Exiting master.sh."
+  exit 1
+fi
+
 echo "[TASK 2] Generate and save cluster join command to /vagrant/scripts/joincluster.sh"
-sudo kubeadm token create --print-join-command > /vagrant/scripts/joincluster.sh 2>/dev/null
-echo "...done..."
+kubeadm token create --print-join-command > /vagrant/scripts/joincluster.sh
 
-# Enable cluster control for users vagrant and kube, without the need for sudo
-echo ""
 echo "[TASK 3] Copy kube admin config to user's .kube directory"
 mkdir -p /home/vagrant/.kube
+cp /etc/kubernetes/admin.conf /home/vagrant/.kube/config
+chown vagrant:vagrant /home/vagrant/.kube/config
+
 mkdir -p /home/kube/.kube
-sudo cp -i /etc/kubernetes/admin.conf /home/vagrant/.kube/config
-sudo cp -i /etc/kubernetes/admin.conf /home/kube/.kube/config
-sudo chown vagrant:vagrant /home/vagrant/.kube/config
-sudo chown kube:kube /home/kube/.kube/config
-echo "...done..."
+cp /etc/kubernetes/admin.conf /home/kube/.kube/config
+chown kube:kube /home/kube/.kube/config
 
 echo "[TASK 4] Install Pod Networking plugin"
-pod_network_plugin=$(cat /vagrant/config.yaml | grep "pod_network_plugin" | awk '{print $2}')
-echo "$pod_network_plugin Networking plugin selected"
-if [ "$pod_network_plugin" == "Flannel" ]; then
-    echo "Installing Flannel network plugin"
-     su - vagrant -c "kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml"
-elif [ "$pod_network_plugin" == "Weave" ]; then
-    echo "Installing Weave network plugin"
-    su - vagrant -c "kubectl apply -f https://github.com/weaveworks/weave/releases/download/v2.8.1/weave-daemonset-k8s.yaml"
-elif [ "$pod_network_plugin" == "Cilium" ]; then
-    echo "Installing Cilium networking plugin"
-    CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
-    CLI_ARCH=amd64
-    if [ "$(uname -m)" = "aarch64" ]; then CLI_ARCH=arm64; fi
-    curl -L --fail --remote-name-all https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-${CLI_ARCH}.tar.gz{,.sha256sum}
-    sha256sum --check cilium-linux-${CLI_ARCH}.tar.gz.sha256sum
-    sudo tar xzvfC cilium-linux-${CLI_ARCH}.tar.gz /usr/local/bin
-    rm cilium-linux-${CLI_ARCH}.tar.gz{,.sha256sum}
-    export KUBECONFIG=/home/vagrant/.kube/config
-    su - vagrant -c "cilium install --version 1.14.5"
-else
-    echo "Unknown pod network plugin specified in config file"
+echo "Cilium Networking plugin selected"
+echo "Installing Cilium networking plugin"
+
+export KUBECONFIG=/etc/kubernetes/admin.conf
+
+# Validate cluster before installing Cilium
+if ! kubectl get nodes &> /dev/null; then
+  echo "❌ Kubernetes API unreachable. Skipping Cilium install."
+  exit 1
 fi
-echo "...done..."
+
+curl -LO https://github.com/cilium/cilium-cli/releases/latest/download/cilium-linux-amd64.tar.gz
+tar xzvf cilium-linux-amd64.tar.gz
+mv cilium /usr/local/bin
+
+cilium install
+
 echo "##################################"
 echo "#   MASTER NODE SETUP COMPLETE   #"
 echo "##################################"
-echo ""
-echo ""
