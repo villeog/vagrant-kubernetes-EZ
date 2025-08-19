@@ -1,113 +1,62 @@
 #!/bin/bash
-echo ""
-echo "##################################"
-echo "# RUNNING requirements.sh script #"
-echo "##################################"
-sleep 2
-echo ""
-echo ""
-echo ""
-echo "[TASK 1] update hosts file"
-sudo cat /tmp/scripts/hosts > /etc/hosts
-echo "...done..."
 
-# install time synchronization server
-echo ""
-echo "[TASK 2] install time synchronization server"
-sudo apt update
-sudo apt-get install ntp -y
-sudo apt-get install ntpdate -y
-sudo ntpdate ntp.ubuntu.com
-echo "...done..."
-
-# Forwarding IPv4 and letting iptables see bridged traffic:
-echo ""
-echo "[TASK 3] Forwarding IPv4 and letting iptables see bridged traffic"
-cat <<EOF | sudo tee /etc/modules-load.d/k8s.conf
-overlay
-br_netfilter
-EOF
-sudo modprobe overlay
-sudo modprobe br_netfilter
-echo "...done..."
-
-# sysctl params required by setup, params persist across reboots
-echo ""
-echo "[TASK 4] sysctl params required by setup, params persist across reboots"
-cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf
-net.bridge.bridge-nf-call-iptables  = 1
-net.bridge.bridge-nf-call-ip6tables = 1
-net.ipv4.ip_forward                 = 1
+echo "[TASK 1] Update /etc/hosts file with hostnames"
+cat >> /etc/hosts <<EOF
+192.168.56.10 master
+192.168.56.11 worker1
+192.168.56.12 worker2
 EOF
 
-# Apply sysctl params without reboot
-sudo sysctl --system
-echo "...done..."
-
-# Disable swap
-echo ""
-echo "[TASK 5] Disable swap"
+echo "[TASK 2] Disable swap"
+swapoff -a
 sed -i '/swap/d' /etc/fstab
-sudo swapoff -a
-echo "...done..."
 
-# Add repository:
-echo ""
-echo "[TASK 6] Add repository"
-sudo install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-sudo chmod a+r /etc/apt/keyrings/docker.gpg
-echo \
- "deb [arch="$(dpkg --print-architecture)" signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
- "$(. /etc/os-release && echo "$VERSION_CODENAME")" stable" | \
- sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-echo "...done..."
+echo "[TASK 3] Install containerd runtime"
+apt-get update
+apt-get install -y containerd
 
-# Install Containerd:
-echo ""
-echo "[TASK 7] Install Containerd"
-sudo apt-get update
-sudo apt-get install containerd -y
+echo "[TASK 4] Configure containerd and enable service"
+mkdir -p /etc/containerd
+containerd config default > /etc/containerd/config.toml
+systemctl restart containerd
+systemctl enable containerd
 
-# Install apt-transport-https pkg
-sudo apt-get update && sudo apt-get install -y apt-transport-https ca-certificates curl gpg
-curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.26/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+echo "[TASK 5] Add Kubernetes apt repo with refreshed GPG key"
+mkdir -p /etc/apt/keyrings
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.26/deb/Release.key | \
+  gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
 
-# Configuring the systemd cgroup drive:
-# Creating a containerd configuration file by executing the following command
-sudo mkdir -p /etc/containerd
-sudo containerd config default | sudo tee /etc/containerd/config.toml
-sudo sed -i 's/            SystemdCgroup = false/            SystemdCgroup = true/' /etc/containerd/config.toml
+echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.26/deb/ /" \
+  > /etc/apt/sources.list.d/kubernetes.list
 
-# Restart containerd
+apt-get update
 
-sudo systemctl restart containerd
+echo "[TASK 6] Install Kubernetes components"
+apt-get install -y kubelet kubeadm kubectl
 
-# Add Kubernetes repository:
-echo ""
-echo "[TASK 8] Install Kubernetes components"
-sudo curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.26/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-sudo echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.26/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
+# Fallback if install failed
+if ! command -v kubeadm &> /dev/null; then
+  echo "❌ kubeadm not found. Retrying install..."
+  apt-get update
+  apt-get install -y kubelet kubeadm kubectl
+fi
 
-# Update apt package index, install kubelet, kubeadm and kubectl, and pin their version:
-sudo apt-get update
-sudo apt-get install -y kubelet=1.26.1-1.1 kubectl=1.26.1-1.1 kubeadm=1.26.1-1.1
-sudo apt-mark hold kubelet kubeadm kubectl
-echo "...done..."
+echo "[TASK 7] Enable kubelet service"
+systemctl enable kubelet
+systemctl start kubelet
 
-# create user kube for compliancy and add to sudoers
-echo ""
-echo "[TASK 9] create user kube for compliancy and add to sudoers"
-sudo useradd -md "/home/kube" -G sudo kube
-sudo echo "kube:kube" | sudo chpasswd
-sudo cp /home/vagrant/.bashrc /home/kube/.bashrc
-sudo chown kube:kube /home/kube/.bashrc
-echo "...done..."
+echo "[TASK 8] Apply sysctl settings"
+modprobe overlay
+modprobe br_netfilter
 
-# create alias for kubectl command
-echo ""
-echo "[TASK 10] create alias for kubectl command"
-su - vagrant -c 'echo "alias k=kubectl" >> /home/vagrant/.bashrc'
-su - kube -c 'echo "alias k=kubectl" >> /home/kube/.bashrc'
-echo "...done..."
-sleep 5
+cat <<EOF | tee /etc/sysctl.d/kubernetes.conf
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+net.ipv4.ip_forward = 1
+EOF
+
+sysctl --system
+
+# Suppress deprecated sysctl warnings
+sysctl -w net.ipv4.conf.all.accept_source_route=0 || true
+sysctl -w net.ipv4.conf.all.promote_secondaries=1 || true
